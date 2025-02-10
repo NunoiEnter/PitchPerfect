@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from "recharts";
@@ -9,6 +9,8 @@ export default function PitchPerfect() {
   const [originalFile, setOriginalFile] = useState(null);
   const [userFile, setUserFile] = useState(null);
   const [analysisData, setAnalysisData] = useState(null);
+  const [musicalKeys, setMusicalKeys] = useState(null);
+  const [maxDuration, setMaxDuration] = useState(0);
 
   const handleFileUpload = (e, type) => {
     const file = e.target.files[0];
@@ -16,14 +18,12 @@ export default function PitchPerfect() {
     else setUserFile(file);
   };
 
-  const extractPitch = async (file) => {
-    return new Promise(async (resolve) => {
+  const extractPitch = (file) => {
+    return new Promise((resolve) => {
       const reader = new FileReader();
       reader.readAsArrayBuffer(file);
       reader.onload = async () => {
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-
-        // Resume AudioContext if it's suspended
         if (audioContext.state === "suspended") {
           await audioContext.resume();
         }
@@ -35,13 +35,12 @@ export default function PitchPerfect() {
         source.connect(analyser);
         analyser.connect(audioContext.destination);
 
-        // Meyda Analyzer
         const pitchData = [];
         const meydaAnalyzer = Meyda.createMeydaAnalyzer({
           audioContext: audioContext,
           source: source,
           bufferSize: 512,
-          featureExtractors: ["chroma"], // Use "chroma" instead of "pitch"
+          featureExtractors: ["chroma"],
           callback: (features) => {
             if (features && features.chroma) {
               const avgPitch = features.chroma.reduce((sum, val) => sum + val, 0) / features.chroma.length;
@@ -56,10 +55,81 @@ export default function PitchPerfect() {
         setTimeout(() => {
           meydaAnalyzer.stop();
           resolve(pitchData);
-        }, 3000); // Analyze for 3 seconds
+        }, 3000);
       };
     });
   };
+
+
+  const detectKey = (chroma) => {
+    const keys = [
+      "C Major", "C# Major", "D Major", "D# Major", "E Major", "F Major",
+      "F# Major", "G Major", "G# Major", "A Major", "A# Major", "B Major"
+    ];
+    const maxIndex = chroma.indexOf(Math.max(...chroma));
+    return keys[maxIndex];
+  };
+
+  const getMusicalKey = async (file) => {
+    return new Promise(async (resolve) => {
+      const reader = new FileReader();
+      reader.readAsArrayBuffer(file);
+      reader.onload = async () => {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioContext.state === "suspended") await audioContext.resume();
+
+        const audioBuffer = await audioContext.decodeAudioData(reader.result);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        const analyser = audioContext.createAnalyser();
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+
+        let keyDetected = "Unknown";
+        const meydaAnalyzer = Meyda.createMeydaAnalyzer({
+          audioContext: audioContext,
+          source: source,
+          bufferSize: 512,
+          featureExtractors: ["chroma"],
+          callback: (features) => {
+            if (features.chroma) {
+              keyDetected = detectKey(features.chroma);
+            }
+          },
+        });
+
+        source.start();
+        meydaAnalyzer.start();
+
+        setTimeout(() => {
+          meydaAnalyzer.stop();
+          resolve(keyDetected);
+        }, 3000);
+      };
+    });
+  };
+
+  const getAudioDuration = async (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.readAsArrayBuffer(file);
+      reader.onload = async () => {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const audioBuffer = await audioContext.decodeAudioData(reader.result);
+        resolve(audioBuffer.duration); // Returns duration in seconds
+      };
+    });
+  };
+
+
+  const formatTime = (index, sampleRate = 44100, bufferSize = 512) => {
+    const seconds = (index * bufferSize) / sampleRate;
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.round(seconds % 60); // Ensure rounding
+  
+    return `${minutes} min ${remainingSeconds} sec`;
+  };
+  
 
   const analyzeVoice = async () => {
     if (!originalFile || !userFile) {
@@ -69,17 +139,29 @@ export default function PitchPerfect() {
 
     const originalPitch = await extractPitch(originalFile);
     const userPitch = await extractPitch(userFile);
+    const originalKey = await getMusicalKey(originalFile);
+    const userKey = await getMusicalKey(userFile);
 
-    // Ensure we have the same data length
+    setMusicalKeys({ original: originalKey, user: userKey });
+
+    // Get the duration of both files
+    const originalDuration = await getAudioDuration(originalFile);
+    const userDuration = await getAudioDuration(userFile);
+
+    // Set maxDuration based on the longest file
+    const maxFileDuration = Math.max(originalDuration, userDuration);
+    setMaxDuration(maxFileDuration);
+
     const length = Math.min(originalPitch.length, userPitch.length);
     const analysisData = Array.from({ length }, (_, i) => ({
-      name: `Time ${i}`,
+      name: formatTime(i, length, maxFileDuration), // Pass max duration
       original: originalPitch[i],
       user: userPitch[i],
     }));
 
     setAnalysisData(analysisData);
   };
+
 
   return (
     <div className="min-h-screen w-full px-4 py-8 sm:px-6 lg:px-8 flex flex-col items-center justify-center bg-gray-900 text-white">
@@ -100,22 +182,25 @@ export default function PitchPerfect() {
           </Button>
         </div>
       </div>
-      {analysisData && (
-        <div className="mt-8 w-full max-w-xs sm:max-w-md md:max-w-2xl px-2">
-          <h2 className="text-lg sm:text-xl mb-4 text-center">Voice Analysis</h2>
-          <div className="w-full h-[300px] sm:h-[400px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={analysisData}>
-                <XAxis dataKey="name" stroke="#ccc" tick={{ fontSize: "12px" }} />
-                <YAxis stroke="#ccc" tick={{ fontSize: "12px" }} />
-                <Tooltip />
-                <Legend />
-                <Line type="monotone" dataKey="original" stroke="#8884d8" strokeWidth={2} />
-                <Line type="monotone" dataKey="user" stroke="#82ca9d" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+
+      {musicalKeys && (
+        <div className="mt-4 text-center">
+          <p className="text-lg">🎵 <strong>Original Song Key:</strong> {musicalKeys.original}</p>
+          <p className="text-lg">🎤 <strong>Your Singing Key:</strong> {musicalKeys.user}</p>
         </div>
+      )}
+
+      {analysisData && (
+        <ResponsiveContainer width="80%" height={300} className="mt-6">
+          <LineChart data={analysisData}>
+            <XAxis dataKey="name" />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Line type="monotone" dataKey="original" stroke="#8884d8" />
+            <Line type="monotone" dataKey="user" stroke="#82ca9d" />
+          </LineChart>
+        </ResponsiveContainer>
       )}
     </div>
   );
